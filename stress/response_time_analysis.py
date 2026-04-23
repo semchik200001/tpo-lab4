@@ -2,7 +2,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 
-df = pd.read_csv('/Users/admin/tpo-4/stress/result/results.csv')
+df = pd.read_csv('/Users/admin/tpo-4/load-extra/result-delay/results.csv')
 
 stats = df.groupby('grpThreads')['elapsed'].agg([
     'mean',
