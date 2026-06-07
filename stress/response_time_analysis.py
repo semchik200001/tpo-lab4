@@ -1,79 +1,80 @@
+#!/usr/bin/env python3
+"""Анализ стресс-тестирования: график зависимости времени отклика от нагрузки.
+
+Результаты собраны через SSH-туннель до сервера кафедры, поэтому в сырых данных
+присутствуют сетевые выбросы. Для построения наглядной зависимости данные
+агрегируются по диапазонам нагрузки (бинам) с использованием медианы и
+перцентилей, устойчивых к выбросам.
+"""
+import os
+import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import numpy as np
 
-df = pd.read_csv('/Users/admin/tpo-4/load-extra/result-delay/results.csv')
+BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CSV = os.path.join(BASE, 'stress', 'result', 'results.csv')
+OUT = os.path.join(BASE, 'response_time_vs_load.png')
+THRESHOLD_MS = 680
+BIN = 10  # ширина диапазона нагрузки (потоков) для агрегации
 
-stats = df.groupby('grpThreads')['elapsed'].agg([
-    'mean',
-    'median',
-    'min',
-    'max',
-    'std'
-]).reset_index()
+df = pd.read_csv(CSV)
+df = df[df['grpThreads'] > 0].copy()
+df['bin'] = ((df['grpThreads'] - 1) // BIN) * BIN + BIN // 2  # центр диапазона
 
-percentiles = df.groupby('grpThreads')['elapsed'].quantile([0.9, 0.95, 0.99]).unstack()
-percentiles.columns = ['p90', 'p95', 'p99']
-stats = stats.merge(percentiles, left_on='grpThreads', right_index=True)
+agg = df.groupby('bin')['elapsed'].agg(
+    median='median',
+    mean='mean',
+    p90=lambda s: s.quantile(0.9),
+    p95=lambda s: s.quantile(0.95),
+    p99=lambda s: s.quantile(0.99),
+    n='count',
+).reset_index()
+agg = agg[agg['n'] >= 5]  # отбрасываем диапазоны с недостатком данных
 
-THRESHOLD_MS = 740
+print("Агрегированная статистика по диапазонам нагрузки:")
+print(agg.to_string(index=False))
+print("\n" + "=" * 80)
 
-print("Статистика по нагрузке:")
-print(stats.to_string(index=False))
-print("\n" + "="*80 + "\n")
+plt.style.use('seaborn-v0_8-whitegrid')
+fig, axes = plt.subplots(1, 2, figsize=(15, 5.5))
+fig.suptitle('Зависимость времени отклика от нагрузки (стресс-тестирование, config #3)',
+             fontsize=14, fontweight='bold')
 
-fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-fig.suptitle('Анализ времени отклика в зависимости от нагрузки', fontsize=14, fontweight='bold')
-
+# --- Левый график: медиана и среднее ---
 ax1 = axes[0]
-ax1.plot(stats['grpThreads'], stats['mean'], 'b-o', label='Среднее', linewidth=2, markersize=6)
-ax1.plot(stats['grpThreads'], stats['median'], 'g-s', label='Медиана', linewidth=2, markersize=6)
-ax1.axhline(y=THRESHOLD_MS, color='r', linestyle='--', linewidth=2, label=f'Порог ({THRESHOLD_MS} мс)')
-ax1.fill_between(stats['grpThreads'], THRESHOLD_MS, stats['mean'], 
-                  where=(stats['mean'] > THRESHOLD_MS), color='red', alpha=0.3)
-ax1.set_xlabel('Нагрузка (количество потоков)', fontsize=10)
-ax1.set_ylabel('Время отклика (мс)', fontsize=10)
-ax1.set_title('Среднее и медианное время отклика')
-ax1.legend()
-ax1.grid(True, alpha=0.3)
+ax1.plot(agg['bin'], agg['median'], color='#2ca02c', marker='s', ms=4, lw=2, label='Медиана')
+ax1.plot(agg['bin'], agg['mean'], color='#1f77b4', marker='o', ms=4, lw=2, label='Среднее')
+ax1.axhline(THRESHOLD_MS, color='#d62728', ls='--', lw=2, label=f'Порог ({THRESHOLD_MS} мс)')
+ax1.fill_between(agg['bin'], THRESHOLD_MS, agg['median'],
+                 where=(agg['median'] > THRESHOLD_MS), color='#d62728', alpha=0.12)
+ax1.set_xlabel('Нагрузка (количество параллельных потоков)')
+ax1.set_ylabel('Время отклика, мс')
+ax1.set_title('Медианное и среднее время отклика')
+ax1.legend(loc='upper left')
 
-threshold_exceeded = stats[stats['mean'] > THRESHOLD_MS]
-if not threshold_exceeded.empty:
-    max_load_before_threshold = stats[stats['mean'] <= THRESHOLD_MS]['grpThreads'].max() if len(stats[stats['mean'] <= THRESHOLD_MS]) > 0 else 0
-    print(f"Порог {THRESHOLD_MS} мс превышен при нагрузке: {threshold_exceeded.iloc[0]['grpThreads']} потоков")
-    print(f"Максимальная нагрузка без превышения порога: {max_load_before_threshold} потоков")
-    print(f"Максимальная пропускная способность: ~{threshold_exceeded.iloc[0]['grpThreads'] * 1000 / THRESHOLD_MS:.1f} запросов/сек")
-else:
-    print(f"При всех нагрузках среднее время отклика не превышает {THRESHOLD_MS} мс")
-
+# --- Правый график: перцентили ---
 ax2 = axes[1]
-ax2.plot(stats['grpThreads'], stats['p90'], 'b-o', label='P90 (90% запросов)', linewidth=2, markersize=6)
-ax2.plot(stats['grpThreads'], stats['p95'], 'g-s', label='P95 (95% запросов)', linewidth=2, markersize=6)
-ax2.plot(stats['grpThreads'], stats['p99'], 'm-^', label='P99 (99% запросов)', linewidth=2, markersize=6)
-ax2.axhline(y=THRESHOLD_MS, color='r', linestyle='--', linewidth=2, label=f'Порог ({THRESHOLD_MS} мс)')
-ax2.set_xlabel('Нагрузка (количество потоков)', fontsize=10)
-ax2.set_ylabel('Время отклика (мс)', fontsize=10)
-ax2.set_title('Процентили времени отклика')
-ax2.legend()
-ax2.grid(True, alpha=0.3)
+ax2.plot(agg['bin'], agg['p90'], color='#1f77b4', marker='o', ms=4, lw=2, label='P90')
+ax2.plot(agg['bin'], agg['p95'], color='#ff7f0e', marker='s', ms=4, lw=2, label='P95')
+ax2.plot(agg['bin'], agg['p99'], color='#9467bd', marker='^', ms=4, lw=2, label='P99')
+ax2.axhline(THRESHOLD_MS, color='#d62728', ls='--', lw=2, label=f'Порог ({THRESHOLD_MS} мс)')
+ax2.set_xlabel('Нагрузка (количество параллельных потоков)')
+ax2.set_ylabel('Время отклика, мс')
+ax2.set_title('Перцентили времени отклика')
+ax2.legend(loc='upper left')
 
-plt.tight_layout()
-plt.savefig('response_time_vs_load.png', dpi=150, bbox_inches='tight')
-plt.show()
+plt.tight_layout(rect=[0, 0, 1, 0.96])
+plt.savefig(OUT, dpi=150, bbox_inches='tight')
+print(f"График сохранён: {OUT}")
 
-print("\n" + "="*80)
-print("ИТОГОВЫЙ АНАЛИЗ:")
-print("="*80)
-
-for idx, row in stats.iterrows():
-    if row['mean'] > THRESHOLD_MS:
-        print(f"\nКРИТИЧЕСКАЯ НАГРУЗКА: {int(row['grpThreads'])} потоков")
-        print(f"   - Среднее время отклика: {row['mean']:.1f} мс (превышает порог {THRESHOLD_MS} мс)")
-        print(f"   - Медиана: {row['median']:.1f} мс")
-        print(f"   - P99: {row['p99']:.1f} мс")
-        print(f"   - Разброс: {row['min']:.0f} - {row['max']:.0f} мс")
-        break
+# --- Точка пробоя порога по медиане ---
+print("\nИТОГОВЫЙ АНАЛИЗ (по медиане, устойчивой к сетевым выбросам):")
+over = agg[agg['median'] > THRESHOLD_MS]
+ok = agg[agg['median'] <= THRESHOLD_MS]
+if not over.empty:
+    first = int(over.iloc[0]['bin'])
+    max_ok = int(ok['bin'].max()) if not ok.empty else 0
+    print(f"  Порог {THRESHOLD_MS} мс по медиане превышается начиная с диапазона ~{first} потоков")
+    print(f"  Максимальная нагрузка с медианой в пределах порога: ~{max_ok} потоков")
 else:
-    print(f"\nПри всех протестированных нагрузках (до {int(stats['grpThreads'].max())} потоков)")
-    print(f"   среднее время отклика не превышает {THRESHOLD_MS} мс")
-    print(f"   Максимальное среднее: {stats['mean'].max():.1f} мс при {int(stats.loc[stats['mean'].idxmax(), 'grpThreads'])} потоках")
+    print(f"  Медиана не превышает {THRESHOLD_MS} мс на всём диапазоне нагрузки")

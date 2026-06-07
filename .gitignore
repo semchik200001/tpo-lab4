@@ -1,2 +1,6 @@
 venv
-jmeter.log
+*.log
+result_old/
+.claude/
+~$*
+.DS_Store
